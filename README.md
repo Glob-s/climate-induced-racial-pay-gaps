@@ -36,4 +36,5 @@ The broader point is that climate adaptation has an internal distributive dimens
 ---
 
 <img src="assets/fig2.png" alt="Figure 2: Reported post-disaster compensation effects from the Brazilian establishment-year analysis. Values draw from the manuscript outline and extended abstract." width="100%"/>
+
 *Figure 2: Reported post-disaster compensation effects from the Brazilian establishment-year analysis. Values draw from the manuscript outline and extended abstract.*
