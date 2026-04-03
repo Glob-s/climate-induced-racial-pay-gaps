@@ -1,0 +1,989 @@
+--------------------------------------------------------------------------------------------------------------------
+      name:  <unnamed>
+       log:  /projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/callaway_did.log
+  log type:  text
+ opened on:   8 Feb 2026, 11:42:13
+
+. 
+. do 00_globals.do
+
+. * 0.1 Install required packages ---------------------------------------------
+. cap which csdid
+
+. if _rc ssc install csdid, replace
+
+. cap which event_plot
+
+. if _rc ssc install event_plot, replace
+
+. cap ssc install estout, replace          // for summary table, optional
+
+. ssc install drdid, replace
+checking drdid consistency and verifying not already installed...
+all files already exist and are up to date.
+
+. 
+. * 1. Load data ---------------------------------------------------------------
+. import delimited "data/brazil_firms_panel_2003_2017.csv", ///
+>         varnames(1) stringcols(1) clear
+(encoding automatically selected: ISO-8859-2)
+(20 vars, 978,175 obs)
+
+. 
+. destring year, replace force
+year already numeric; no replace
+
+. 
+. * 1.1 Create output directories -----------------------------------------------
+. cap mkdir results
+
+. cap mkdir results/tables 
+
+. cap mkdir results/plots 
+
+. 
+. * 2. Treatment timing --------------------------------------------------------
+. egen first_hit = min(cond(treated==1, year, .)), by(cnpj_cei)
+(850,596 missing values generated)
+
+. gen  never_treated = missing(first_hit)
+
+. replace first_hit = 0 if never_treated  // CS&A requires never-treated = 0
+(850,596 real changes made)
+
+. 
+. * 2.1 Forward-fill first_hit within treated grids ---------------------------
+. bysort cnpj_cei (year): replace first_hit = first_hit[1]
+(0 real changes made)
+
+. 
+. * 2.2 drop observations after a SECOND disaster hits the same est.
+. 
+. bys cnpj_cei: egen second_hit_year = min(cond(treated==1 & first_hit!=0 & year>first_hit, year, .))
+(948,326 missing values generated)
+
+. drop if !missing(second_hit_year) & year >= second_hit_year // keep first-event panel
+(13,168 observations deleted)
+
+. order cnpj_cei year first_hit
+
+. 
+. * 3. Drop outdated values from master panel
+. drop avg_wage_est avg_wage_white avg_wage_nonwhite avg_wage_female avg_wage_male avg_wage_lowereduc avg_wage_highe
+> reduc avg_wage_disab avg_wage_nondis
+
+. 
+. save "data/panel_estab_year.dta", replace
+file data/panel_estab_year.dta saved
+
+. 
+end of do-file
+
+. do 01_utils.do
+
+. version 18.0
+
+. 
+. global NUMFMT "%9.3f"
+
+. global SEFMT  "%9.3f"
+
+. global PFMT   "%9.3f"
+
+. 
+. ********************************************************************************
+. * --- Helper function adapted ---
+. ********************************************************************************
+. cap program drop _es_export_with_plot
+
+. program define _es_export_with_plot
+  1.     version 18.0
+  2.     syntax , DV(string) TITLE(string) OUTDOC(string) [PRE(integer 3) POSTSHORT(integer 4) POSTLONG(integer 6)]
+  3. 
+.     * Clean title to avoid non-ASCII (remove Unicode escapes)
+.     local clean_title = subinstr("`title'", "", "-", .)
+  4. 
+.     * Run csdid
+.     quietly csdid `dv', ivar(est_id) time(year) gvar(first_hit) notyet vce(cluster est_id)
+  5.     estimates store es
+  6. 
+.     * Event study plotting
+.     quietly estat event, window(-`pre' `postlong')
+  7.     
+.     preserve
+  8.         * PNG path
+.         local outpng = subinstr("`outdoc'","results/tables/","results/plots/",.)
+  9.         local outpng = subinstr("`outpng'",".docx",".png",.)
+ 10. 
+.         csdid_plot, xtitle("Event time (years)") ytitle("ATT") title("`clean_title'")
+ 11.         graph export "`outpng'", replace width(2000)
+ 12. 
+.         * DOCX export
+.         putdocx clear
+ 13.         putdocx begin, pagesize(letter) font("Arial",10)
+ 14.         putdocx paragraph, style(Heading1)
+ 15.         putdocx text ("`title'")
+ 16.         putdocx paragraph, style(Heading2)
+ 17.         
+.         quietly estat event, window(-`pre' `postlong')
+ 18.         putdocx text ("Event-time dynamics (-`pre'..`postlong')")
+ 19.         matrix table_transposed = r(table)'
+ 20.         putdocx table t1 = matrix(table_transposed), rownames colnames nformat("$NUMFMT")
+ 21.         putdocx paragraph, style(Heading2)
+ 22.         putdocx text ("Aggregated effects (coefficients only)")
+ 23.         
+.         quietly estat event, window(-`pre' -1)
+ 24.         putdocx paragraph
+ 25.         putdocx text ("Pre_avg (-`pre'..-1)  = " + strofreal(r(table)[1,1], "$NUMFMT"))
+ 26.         
+.         quietly estat event, window(0 `postshort')
+ 27.         putdocx paragraph
+ 28.         putdocx text ("Post_avg (0..`postshort') = " + strofreal(r(table)[1,2], "$NUMFMT"))
+ 29.         
+.         quietly estat event, window(0 `postlong')
+ 30.         putdocx paragraph
+ 31.         putdocx text ("Post_avg (0..`postlong') = " + strofreal(r(table)[1,2], "$NUMFMT"))
+ 32.         
+.         * Wald tests
+.         putdocx paragraph, style(Heading2)
+ 33.         putdocx text ("Wald Tests")
+ 34.         
+.         putdocx paragraph
+ 35.         putdocx text ("H0: all pre-treatment coefficients are equal to zero (-3 -1)")
+ 36.         putdocx paragraph
+ 37.         * Pre-treatment tests (-3 -1)
+.         estimates restore es
+ 38.         cap quietly estat event, window(-3 -1) post
+ 39.         if _rc == 0{
+ 40.                 local coefnames : colnames e(b)
+ 41.                 local tst ""
+ 42.                 foreach c of local coefnames {
+ 43.                         if strpos("`c'", "Tm"){
+ 44.                                 local tst "`tst' (`c'=0)"
+ 45.                         }
+ 46.                     }
+ 47.                 test `tst'
+ 48.                 putdocx table preWald = (3, 2)
+ 49.                 putdocx table preWald(1,1) = ("chi2"), bold
+ 50.                 putdocx table preWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+ 51.                 putdocx table preWald(2,1) = ("df"), bold
+ 52.                 putdocx table preWald(2,2) = (string(r(df)))
+ 53.                 putdocx table preWald(3,1) = ("p"), bold
+ 54.                 putdocx table preWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+ 55.         } 
+ 56.         else {
+ 57.                 putdocx text ("Test failed, missing/incomplete coefficients for window (-3 -1)")
+ 58.         }
+ 59.         
+.         putdocx paragraph
+ 60.         putdocx text ("H0: all short-run post-treatment coefficients are equal to zero (0 2)")
+ 61.         putdocx paragraph
+ 62.         * Short-run post-treatment tests (0 2)
+.         estimates restore es
+ 63.         cap quietly estat event, window(0 2) post
+ 64.         if _rc == 0{
+ 65.                 local coefnames : colnames e(b)
+ 66.                 local tst ""
+ 67.                 foreach c of local coefnames {
+ 68.                         if strpos("`c'", "Tp"){
+ 69.                                 local tst "`tst' (`c'=0)"
+ 70.                         }
+ 71.                     }
+ 72.                 test `tst'
+ 73.                 putdocx table srWald = (3, 2)
+ 74.                 putdocx table srWald(1,1) = ("chi2"), bold
+ 75.                 putdocx table srWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+ 76.                 putdocx table srWald(2,1) = ("df"), bold
+ 77.                 putdocx table srWald(2,2) = (string(r(df)))
+ 78.                 putdocx table srWald(3,1) = ("p"), bold
+ 79.                 putdocx table srWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+ 80.         } 
+ 81.         else {
+ 82.                 putdocx text ("Test failed, missing/incomplete coefficients for window (0 2)")
+ 83.         }
+ 84.         
+.         * Medium-run post-treatment tests (3 POSTSHORT)
+.         putdocx paragraph
+ 85.         putdocx text ("H0: all medium-run post-treatment coefficients are equal to zero (3 `postshort')")
+ 86.         putdocx paragraph
+ 87.         estimates restore es
+ 88.         cap quietly estat event, window(3 `postshort') post
+ 89.         if _rc == 0 {
+ 90.                 local coefnames : colnames e(b)
+ 91.                 local tst ""
+ 92.                 foreach c of local coefnames {
+ 93.                         if strpos("`c'", "Tp"){
+ 94.                                 local tst "`tst' (`c'=0)"
+ 95.                         }
+ 96.                     }
+ 97.                 test `tst'
+ 98.                 putdocx table mrWald = (3, 2)
+ 99.                 putdocx table mrWald(1,1) = ("chi2"), bold
+100.                 putdocx table mrWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+101.                 putdocx table mrWald(2,1) = ("df"), bold
+102.                 putdocx table mrWald(2,2) = (string(r(df)))
+103.                 putdocx table mrWald(3,1) = ("p"), bold
+104.                 putdocx table mrWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+105.         } 
+106.         else {
+107.                 putdocx text ("Test failed, missing/incomplete coefficients for window (3 `postshort')")
+108.         }
+109.         
+.         * Long-run post-treatment tests (5 `postlong')
+.         putdocx paragraph
+110.         putdocx text ("H0: all long-run post-treatment coefficients are equal to zero (5 `postlong')")
+111.         putdocx paragraph
+112.         estimates restore es
+113.         cap quietly estat event, window(5 `postlong') post
+114.         if _rc == 0 {
+115.                 local coefnames : colnames e(b)
+116.                 local tst ""
+117.                 foreach c of local coefnames {
+118.                         if strpos("`c'", "Tp"){
+119.                                 local tst "`tst' (`c'=0)"
+120.                         }
+121.                     }
+122.                 test `tst'
+123.                 putdocx table lrWald = (3, 2)
+124.                 putdocx table lrWald(1,1) = ("chi2"), bold
+125.                 putdocx table lrWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+126.                 putdocx table lrWald(2,1) = ("df"), bold
+127.                 putdocx table lrWald(2,2) = (string(r(df)))
+128.                 putdocx table lrWald(3,1) = ("p"), bold
+129.                 putdocx table lrWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+130.         } 
+131.         else {
+132.                 putdocx text ("Test failed, missing/incomplete coefficients for window (5 `postlong')")
+133.         }
+134.         
+.         * Number of observations (total, per-cohort)
+.         count
+135.         local N = r(N)
+136.         
+.         * Mark first est_id in sample
+.         bys est_id: gen byte __first = (_n == 1)
+137.         count if __first
+138.         local E = r(N)
+139.         
+.         * Number of establishments in treatment group
+.         count if __first & first_hit > 0
+140.         local E_treated = r(N)
+141.         
+.         * Number of establishments in comparison group
+.         count if __first & first_hit == 0
+142.         local E_comp = r(N)
+143.         
+.         drop __first
+144.         
+.         putdocx table obs = (4, 2)
+145.         putdocx table obs(1,1) = ("N Obs"), bold
+146.         putdocx table obs(1,2) = ("`N'")
+147.         putdocx table obs(2,1) = ("N Establishments"), bold
+148.         putdocx table obs(2,2) = ("`E'")
+149.         putdocx table obs(3,1) = ("N Treated Establishments"), bold
+150.         putdocx table obs(3,2) = ("`E_treated'")
+151.         putdocx table obs(4,1) = ("N Comparison Establishments"), bold
+152.         putdocx table obs(4,2) = ("`E_comp'")
+153.         
+.         putdocx paragraph, style(Heading2)
+154.         putdocx text ("Figure saved to: `outpng'")
+155.         putdocx save "`outdoc'", replace
+156.         
+.     restore
+157. end
+
+. 
+. * -----------------------------------------------------------------------------
+. * PROGRAM: descriptive statistics (N, Mean, Std.Dev, Min, Max)
+. * OPTIONS:
+. * vars() - specify varlist as a space-separated list of names e.g. vars("varA varB varC")
+. * numvars() - must be equal to number of variables in vars()
+. * title() - specify title of document
+. * outdoc() - specify full path to save the .docx file
+. * -----------------------------------------------------------------------------
+. cap program drop _desc_table_docx
+
+. program define _desc_table_docx
+  1.     version 18.0
+  2.     syntax , VARS(string) NUMVARS(integer) TITLE(string) OUTDOC(string)
+  3. 
+.     putdocx clear
+  4.     putdocx begin, pagesize(letter) font("Times New Roman",10)
+  5.     putdocx paragraph, style(Heading1)
+  6.     
+.     local nrows = `numvars' + 1
+  7.     putdocx table table1 = (`nrows', 6)
+  8.     
+.     putdocx table table1(1,1) = ("Variable"), bold
+  9.     putdocx table table1(1,2) = ("Obs"), bold
+ 10.     putdocx table table1(1,3) = ("Mean"), bold
+ 11.     putdocx table table1(1,4) = ("Std. Dev"), bold
+ 12.     putdocx table table1(1,5) = ("Min"), bold
+ 13.     putdocx table table1(1,6) = ("Max"), bold
+ 14.     
+.     local i = 2
+ 15.     foreach var of varlist `vars' {
+ 16.         quietly summarize `var'
+ 17.         putdocx table table1(`i',1) = ("`var'")
+ 18.         putdocx table table1(`i',2) = (string(r(N)))
+ 19.         putdocx table table1(`i',3) = (strofreal(r(mean), "$NUMFMT"))
+ 20.         putdocx table table1(`i',4) = (strofreal(r(sd), "$NUMFMT"))
+ 21.         putdocx table table1(`i',5) = (strofreal(r(min), "$NUMFMT"))
+ 22.         putdocx table table1(`i',6) = (strofreal(r(max), "$NUMFMT"))
+ 23.         
+.         local ++i
+ 24.     }
+ 25.     putdocx paragraph
+ 26.     putdocx text ("Notes: Establishment-year panel. Means and standard deviations computed over the estimation 
+> sample. ")
+ 27.     putdocx save "`outdoc'", replace
+ 28. end
+
+. 
+end of do-file
+
+. do 02_reference.do
+
+. 
+. /*******************************************************************************
+>   02_reference.do – DVs: wage gap between white & non-white employees, holding job type constants
+>   Produces event-time tables (DOCX) and plots (PNG) for each mechanism.
+>   Uses Callaway–Sant'Anna (csdid) with first-hit timing and not-yet-treated controls.
+>   Assumes "drop after second hit" is enforced upstream in panel_estab_year.dta.
+> *******************************************************************************/
+. version 18.0
+
+. quietly {
+
+. do "01_utils.do"
+
+. version 18.0
+
+. 
+. global NUMFMT "%9.3f"
+
+. global SEFMT  "%9.3f"
+
+. global PFMT   "%9.3f"
+
+. 
+. ********************************************************************************
+. * --- Helper function adapted ---
+. ********************************************************************************
+. cap program drop _es_export_with_plot
+
+. program define _es_export_with_plot
+  1.     version 18.0
+  2.     syntax , DV(string) TITLE(string) OUTDOC(string) [PRE(integer 3) POSTSHORT(integer 4) POSTLONG(integer 6)]
+  3. 
+.     * Clean title to avoid non-ASCII (remove Unicode escapes)
+.     local clean_title = subinstr("`title'", "", "-", .)
+  4. 
+.     * Run csdid
+.     quietly csdid `dv', ivar(est_id) time(year) gvar(first_hit) notyet vce(cluster est_id)
+  5.     estimates store es
+  6. 
+.     * Event study plotting
+.     quietly estat event, window(-`pre' `postlong')
+  7.     
+.     preserve
+  8.         * PNG path
+.         local outpng = subinstr("`outdoc'","results/tables/","results/plots/",.)
+  9.         local outpng = subinstr("`outpng'",".docx",".png",.)
+ 10. 
+.         csdid_plot, xtitle("Event time (years)") ytitle("ATT") title("`clean_title'")
+ 11.         graph export "`outpng'", replace width(2000)
+ 12. 
+.         * DOCX export
+.         putdocx clear
+ 13.         putdocx begin, pagesize(letter) font("Arial",10)
+ 14.         putdocx paragraph, style(Heading1)
+ 15.         putdocx text ("`title'")
+ 16.         putdocx paragraph, style(Heading2)
+ 17.         
+.         quietly estat event, window(-`pre' `postlong')
+ 18.         putdocx text ("Event-time dynamics (-`pre'..`postlong')")
+ 19.         matrix table_transposed = r(table)'
+ 20.         putdocx table t1 = matrix(table_transposed), rownames colnames nformat("$NUMFMT")
+ 21.         putdocx paragraph, style(Heading2)
+ 22.         putdocx text ("Aggregated effects (coefficients only)")
+ 23.         
+.         quietly estat event, window(-`pre' -1)
+ 24.         putdocx paragraph
+ 25.         putdocx text ("Pre_avg (-`pre'..-1)  = " + strofreal(r(table)[1,1], "$NUMFMT"))
+ 26.         
+.         quietly estat event, window(0 `postshort')
+ 27.         putdocx paragraph
+ 28.         putdocx text ("Post_avg (0..`postshort') = " + strofreal(r(table)[1,2], "$NUMFMT"))
+ 29.         
+.         quietly estat event, window(0 `postlong')
+ 30.         putdocx paragraph
+ 31.         putdocx text ("Post_avg (0..`postlong') = " + strofreal(r(table)[1,2], "$NUMFMT"))
+ 32.         
+.         * Wald tests
+.         putdocx paragraph, style(Heading2)
+ 33.         putdocx text ("Wald Tests")
+ 34.         
+.         putdocx paragraph
+ 35.         putdocx text ("H0: all pre-treatment coefficients are equal to zero (-3 -1)")
+ 36.         putdocx paragraph
+ 37.         * Pre-treatment tests (-3 -1)
+.         estimates restore es
+ 38.         cap quietly estat event, window(-3 -1) post
+ 39.         if _rc == 0{
+ 40.                 local coefnames : colnames e(b)
+ 41.                 local tst ""
+ 42.                 foreach c of local coefnames {
+ 43.                         if strpos("`c'", "Tm"){
+ 44.                                 local tst "`tst' (`c'=0)"
+ 45.                         }
+ 46.                     }
+ 47.                 test `tst'
+ 48.                 putdocx table preWald = (3, 2)
+ 49.                 putdocx table preWald(1,1) = ("chi2"), bold
+ 50.                 putdocx table preWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+ 51.                 putdocx table preWald(2,1) = ("df"), bold
+ 52.                 putdocx table preWald(2,2) = (string(r(df)))
+ 53.                 putdocx table preWald(3,1) = ("p"), bold
+ 54.                 putdocx table preWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+ 55.         } 
+ 56.         else {
+ 57.                 putdocx text ("Test failed, missing/incomplete coefficients for window (-3 -1)")
+ 58.         }
+ 59.         
+.         putdocx paragraph
+ 60.         putdocx text ("H0: all short-run post-treatment coefficients are equal to zero (0 2)")
+ 61.         putdocx paragraph
+ 62.         * Short-run post-treatment tests (0 2)
+.         estimates restore es
+ 63.         cap quietly estat event, window(0 2) post
+ 64.         if _rc == 0{
+ 65.                 local coefnames : colnames e(b)
+ 66.                 local tst ""
+ 67.                 foreach c of local coefnames {
+ 68.                         if strpos("`c'", "Tp"){
+ 69.                                 local tst "`tst' (`c'=0)"
+ 70.                         }
+ 71.                     }
+ 72.                 test `tst'
+ 73.                 putdocx table srWald = (3, 2)
+ 74.                 putdocx table srWald(1,1) = ("chi2"), bold
+ 75.                 putdocx table srWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+ 76.                 putdocx table srWald(2,1) = ("df"), bold
+ 77.                 putdocx table srWald(2,2) = (string(r(df)))
+ 78.                 putdocx table srWald(3,1) = ("p"), bold
+ 79.                 putdocx table srWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+ 80.         } 
+ 81.         else {
+ 82.                 putdocx text ("Test failed, missing/incomplete coefficients for window (0 2)")
+ 83.         }
+ 84.         
+.         * Medium-run post-treatment tests (3 POSTSHORT)
+.         putdocx paragraph
+ 85.         putdocx text ("H0: all medium-run post-treatment coefficients are equal to zero (3 `postshort')")
+ 86.         putdocx paragraph
+ 87.         estimates restore es
+ 88.         cap quietly estat event, window(3 `postshort') post
+ 89.         if _rc == 0 {
+ 90.                 local coefnames : colnames e(b)
+ 91.                 local tst ""
+ 92.                 foreach c of local coefnames {
+ 93.                         if strpos("`c'", "Tp"){
+ 94.                                 local tst "`tst' (`c'=0)"
+ 95.                         }
+ 96.                     }
+ 97.                 test `tst'
+ 98.                 putdocx table mrWald = (3, 2)
+ 99.                 putdocx table mrWald(1,1) = ("chi2"), bold
+100.                 putdocx table mrWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+101.                 putdocx table mrWald(2,1) = ("df"), bold
+102.                 putdocx table mrWald(2,2) = (string(r(df)))
+103.                 putdocx table mrWald(3,1) = ("p"), bold
+104.                 putdocx table mrWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+105.         } 
+106.         else {
+107.                 putdocx text ("Test failed, missing/incomplete coefficients for window (3 `postshort')")
+108.         }
+109.         
+.         * Long-run post-treatment tests (5 `postlong')
+.         putdocx paragraph
+110.         putdocx text ("H0: all long-run post-treatment coefficients are equal to zero (5 `postlong')")
+111.         putdocx paragraph
+112.         estimates restore es
+113.         cap quietly estat event, window(5 `postlong') post
+114.         if _rc == 0 {
+115.                 local coefnames : colnames e(b)
+116.                 local tst ""
+117.                 foreach c of local coefnames {
+118.                         if strpos("`c'", "Tp"){
+119.                                 local tst "`tst' (`c'=0)"
+120.                         }
+121.                     }
+122.                 test `tst'
+123.                 putdocx table lrWald = (3, 2)
+124.                 putdocx table lrWald(1,1) = ("chi2"), bold
+125.                 putdocx table lrWald(1,2) = (strofreal(r(chi2), "$NUMFMT"))
+126.                 putdocx table lrWald(2,1) = ("df"), bold
+127.                 putdocx table lrWald(2,2) = (string(r(df)))
+128.                 putdocx table lrWald(3,1) = ("p"), bold
+129.                 putdocx table lrWald(3,2) = (strofreal(r(p), "$NUMFMT"))
+130.         } 
+131.         else {
+132.                 putdocx text ("Test failed, missing/incomplete coefficients for window (5 `postlong')")
+133.         }
+134.         
+.         * Number of observations (total, per-cohort)
+.         count
+135.         local N = r(N)
+136.         
+.         * Mark first est_id in sample
+.         bys est_id: gen byte __first = (_n == 1)
+137.         count if __first
+138.         local E = r(N)
+139.         
+.         * Number of establishments in treatment group
+.         count if __first & first_hit > 0
+140.         local E_treated = r(N)
+141.         
+.         * Number of establishments in comparison group
+.         count if __first & first_hit == 0
+142.         local E_comp = r(N)
+143.         
+.         drop __first
+144.         
+.         putdocx table obs = (4, 2)
+145.         putdocx table obs(1,1) = ("N Obs"), bold
+146.         putdocx table obs(1,2) = ("`N'")
+147.         putdocx table obs(2,1) = ("N Establishments"), bold
+148.         putdocx table obs(2,2) = ("`E'")
+149.         putdocx table obs(3,1) = ("N Treated Establishments"), bold
+150.         putdocx table obs(3,2) = ("`E_treated'")
+151.         putdocx table obs(4,1) = ("N Comparison Establishments"), bold
+152.         putdocx table obs(4,2) = ("`E_comp'")
+153.         
+.         putdocx paragraph, style(Heading2)
+154.         putdocx text ("Figure saved to: `outpng'")
+155.         putdocx save "`outdoc'", replace
+156.         
+.     restore
+157. end
+
+. 
+. * -----------------------------------------------------------------------------
+. * PROGRAM: descriptive statistics (N, Mean, Std.Dev, Min, Max)
+. * OPTIONS:
+. * vars() - specify varlist as a space-separated list of names e.g. vars("varA varB varC")
+. * numvars() - must be equal to number of variables in vars()
+. * title() - specify title of document
+. * outdoc() - specify full path to save the .docx file
+. * -----------------------------------------------------------------------------
+. cap program drop _desc_table_docx
+
+. program define _desc_table_docx
+  1.     version 18.0
+  2.     syntax , VARS(string) NUMVARS(integer) TITLE(string) OUTDOC(string)
+  3. 
+.     putdocx clear
+  4.     putdocx begin, pagesize(letter) font("Times New Roman",10)
+  5.     putdocx paragraph, style(Heading1)
+  6.     
+.     local nrows = `numvars' + 1
+  7.     putdocx table table1 = (`nrows', 6)
+  8.     
+.     putdocx table table1(1,1) = ("Variable"), bold
+  9.     putdocx table table1(1,2) = ("Obs"), bold
+ 10.     putdocx table table1(1,3) = ("Mean"), bold
+ 11.     putdocx table table1(1,4) = ("Std. Dev"), bold
+ 12.     putdocx table table1(1,5) = ("Min"), bold
+ 13.     putdocx table table1(1,6) = ("Max"), bold
+ 14.     
+.     local i = 2
+ 15.     foreach var of varlist `vars' {
+ 16.         quietly summarize `var'
+ 17.         putdocx table table1(`i',1) = ("`var'")
+ 18.         putdocx table table1(`i',2) = (string(r(N)))
+ 19.         putdocx table table1(`i',3) = (strofreal(r(mean), "$NUMFMT"))
+ 20.         putdocx table table1(`i',4) = (strofreal(r(sd), "$NUMFMT"))
+ 21.         putdocx table table1(`i',5) = (strofreal(r(min), "$NUMFMT"))
+ 22.         putdocx table table1(`i',6) = (strofreal(r(max), "$NUMFMT"))
+ 23.         
+.         local ++i
+ 24.     }
+ 25.     putdocx paragraph
+ 26.     putdocx text ("Notes: Establishment-year panel. Means and standard deviations computed over the estimation 
+> sample. ")
+ 27.     putdocx save "`outdoc'", replace
+ 28. end
+
+. 
+end of do-file
+
+. 
+. * ---------------------------------------------------------------------------
+. * 0. INPUTS and PARAMETERS
+. * ---------------------------------------------------------------------------
+. tempfile mechvars
+
+. 
+. local PRE_LEADS  = 3          // pre: -3,-2,-1
+
+. local POST_LAGS  = 6          // post window: 0..+6
+
+. local POST_SHORT = 4          // main post avg: 0..+4
+
+. local BREPS      = 200        // bootstrap reps
+
+. set seed 20250819
+
+. 
+. * Expected identifiers already in the main panel:
+. *   - cnpj_cei : establishment id (string). If present as cnpjcei, we rename.
+. *   - year     : calendar year (numeric)
+. *   - first_hit: first disaster year (group var for csdid)
+. * -----------------------------------------------------------------------------
+. 
+. * -----------------------------------------------------------------------------
+. * 1. MERGE SOURCES
+. *    A) estb_variables_dec2025.csv (dependent variables)
+. * -----------------------------------------------------------------------------
+. 
+. import delimited using "data/estb_variables_dec2025.csv", ///
+>     varnames(1) stringcols(1) clear
+(encoding automatically selected: ISO-8859-2)
+(46 vars, 980,511 obs)
+
+. cap rename cnpjcei cnpj_cei
+
+. destring year, replace force
+year already numeric; no replace
+
+. save `mechvars', replace
+(file /scratch/3075822.1.p-int/St3718044.000001 not found)
+file /scratch/3075822.1.p-int/St3718044.000001 saved as .dta format
+
+. 
+. * Master analysis panel (already has first_hit and drop-after-second-hit enforced upstream)
+. use "data/panel_estab_year.dta", clear
+
+. cap rename cnpjcei cnpj_cei
+
+. destring year, replace force
+year already numeric; no replace
+
+. 
+. merge 1:1 cnpj_cei year using `mechvars', keep(master match) nogen force
+(variable nu_contr was int, now long to accommodate using data's values)
+(variable nu_contr_female was int, now long to accommodate using data's values)
+(variable nu_contr_highereduc was int, now long to accommodate using data's values)
+
+    Result                      Number of obs
+    -----------------------------------------
+    Not matched                             0
+    Matched                           965,007  
+    -----------------------------------------
+
+. 
+. * Ensure stable numeric establishment id for csdid
+. cap confirm numeric variable est_id
+
+. if _rc {
+.     egen long est_id = group(cnpj_cei)
+.     label var est_id "Establishment ID (numeric)"
+. }
+
+. 
+. * 2. Verify presence of required variables
+. 
+. local reqvars avg_wage_est avg_wage_white avg_wage_nonwhite avg_wage_female avg_wage_male avg_wage_lowereduc avg_w
+> age_highereduc avg_wage_disab avg_wage_nondis
+
+. 
+. foreach v of local reqvars {
+  2.     capture confirm variable `v'
+  3.     if _rc {
+  4.         di as error "Required variable missing: `v'"
+  5.         exit 459
+  6.     }
+  7.     destring `v', replace force
+  8. }
+avg_wage_est already numeric; no replace
+avg_wage_white: contains nonnumeric characters; replaced as double
+(57303 missing values generated)
+avg_wage_nonwhite: contains nonnumeric characters; replaced as double
+(102347 missing values generated)
+avg_wage_female: contains nonnumeric characters; replaced as double
+(49757 missing values generated)
+avg_wage_male: contains nonnumeric characters; replaced as double
+(12446 missing values generated)
+avg_wage_lowereduc: contains nonnumeric characters; replaced as double
+(178804 missing values generated)
+avg_wage_highereduc: contains nonnumeric characters; replaced as double
+(133652 missing values generated)
+avg_wage_disab: contains nonnumeric characters; replaced as double
+(596143 missing values generated)
+avg_wage_nondis: contains nonnumeric characters; replaced as double
+(1109 missing values generated)
+
+. 
+. gen gap_race = avg_wage_nonwhite - avg_wage_white
+(150,883 missing values generated)
+
+. gen gap_gender = avg_wage_female - avg_wage_male
+(62,203 missing values generated)
+
+. gen gap_educ = avg_wage_lowereduc - avg_wage_highereduc
+(270,919 missing values generated)
+
+. gen gap_disab = avg_wage_disab - avg_wage_nondis
+(597,252 missing values generated)
+
+. 
+. * 3. Declare outcome variables: total, low-skill & high-skill contracts (white & non-white) 
+. local ref_outcomes avg_wage_est gap_race gap_gender gap_educ gap_disab 
+
+. misstable sum `ref_outcomes'
+                                                               Obs<.
+                                                +------------------------------
+               |                                | Unique
+      Variable |     Obs=.     Obs>.     Obs<.  | values        Min         Max
+  -------------+--------------------------------+------------------------------
+      gap_race |   150,883             814,124  |   >500  -1543.498    832.3835
+    gap_gender |    62,203             902,804  |   >500  -1848.766    1677.471
+      gap_educ |   270,919             694,088  |   >500  -1509.527    664.8672
+     gap_disab |   597,252             367,755  |   >500  -1125.241    2482.967
+  -----------------------------------------------------------------------------
+
+. 
+. * 4. Generate descriptive statistics for mechanisms and dependent variables
+. 
+. local descriptiveVars "avg_wage_est avg_wage_white avg_wage_nonwhite avg_wage_female avg_wage_male avg_wage_lowere
+> duc avg_wage_highereduc avg_wage_disab avg_wage_nondis gap_race gap_gender gap_educ gap_disab"
+
+. 
+. _desc_table_docx, vars(`descriptiveVars') numvars(13) title("Table 1. Descriptive statistics - baseline variables"
+> ) outdoc("results/tables/Table1_Descriptive.docx")
+successfully replaced "/projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/results/tables/Table1_Descrip
+> tive.docx"
+
+. 
+. 
+. * 5. Run CS&A DiD on each DV ---------------------------
+. foreach y of local ref_outcomes {
+  2.         _es_export_with_plot , dv(`y') title("C&S: `y'") ///
+>         outdoc("results/tables/ES_`y'.docx") pre(`PRE_LEADS') postshort(`POST_SHORT') postlong(`POST_LAGS')
+  3. }
+Panel is not balanced
+Will use observations with Pair balanced (observed at t0 and t1)
+(file results/plots/ES_avg_wage_est.png not found)
+file results/plots/ES_avg_wage_est.png saved as PNG format
+(results es are active now)
+
+ ( 1)  Tm3 = 0
+ ( 2)  Tm2 = 0
+ ( 3)  Tm1 = 0
+
+           chi2(  3) =   13.54
+         Prob > chi2 =    0.0036
+(results es are active now)
+
+ ( 1)  Tp0 = 0
+ ( 2)  Tp1 = 0
+ ( 3)  Tp2 = 0
+
+           chi2(  3) =    9.44
+         Prob > chi2 =    0.0240
+(results es are active now)
+
+ ( 1)  Tp3 = 0
+ ( 2)  Tp4 = 0
+
+           chi2(  2) =    8.67
+         Prob > chi2 =    0.0131
+(results es are active now)
+
+ ( 1)  Tp5 = 0
+ ( 2)  Tp6 = 0
+
+           chi2(  2) =   10.76
+         Prob > chi2 =    0.0046
+  965,007
+  99,323
+  10,733
+  88,590
+successfully created "/projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/results/tables/ES_avg_wage_est
+> .docx"
+Panel is not balanced
+Will use observations with Pair balanced (observed at t0 and t1)
+(file results/plots/ES_gap_race.png not found)
+file results/plots/ES_gap_race.png saved as PNG format
+(results es are active now)
+
+ ( 1)  Tm3 = 0
+ ( 2)  Tm2 = 0
+ ( 3)  Tm1 = 0
+
+           chi2(  3) =    4.89
+         Prob > chi2 =    0.1797
+(results es are active now)
+
+ ( 1)  Tp0 = 0
+ ( 2)  Tp1 = 0
+ ( 3)  Tp2 = 0
+
+           chi2(  3) =    5.52
+         Prob > chi2 =    0.1374
+(results es are active now)
+
+ ( 1)  Tp3 = 0
+ ( 2)  Tp4 = 0
+
+           chi2(  2) =    4.78
+         Prob > chi2 =    0.0915
+(results es are active now)
+
+ ( 1)  Tp5 = 0
+ ( 2)  Tp6 = 0
+
+           chi2(  2) =    7.40
+         Prob > chi2 =    0.0248
+  965,007
+  99,323
+  10,733
+  88,590
+successfully created "/projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/results/tables/ES_gap_race.doc
+> x"
+Panel is not balanced
+Will use observations with Pair balanced (observed at t0 and t1)
+(file results/plots/ES_gap_gender.png not found)
+file results/plots/ES_gap_gender.png saved as PNG format
+(results es are active now)
+
+ ( 1)  Tm3 = 0
+ ( 2)  Tm2 = 0
+ ( 3)  Tm1 = 0
+
+           chi2(  3) =    1.87
+         Prob > chi2 =    0.6000
+(results es are active now)
+
+ ( 1)  Tp0 = 0
+ ( 2)  Tp1 = 0
+ ( 3)  Tp2 = 0
+
+           chi2(  3) =    8.19
+         Prob > chi2 =    0.0423
+(results es are active now)
+
+ ( 1)  Tp3 = 0
+ ( 2)  Tp4 = 0
+
+           chi2(  2) =    3.51
+         Prob > chi2 =    0.1727
+(results es are active now)
+
+ ( 1)  Tp5 = 0
+ ( 2)  Tp6 = 0
+
+           chi2(  2) =    4.41
+         Prob > chi2 =    0.1100
+  965,007
+  99,323
+  10,733
+  88,590
+successfully created "/projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/results/tables/ES_gap_gender.d
+> ocx"
+Panel is not balanced
+Will use observations with Pair balanced (observed at t0 and t1)
+(file results/plots/ES_gap_educ.png not found)
+file results/plots/ES_gap_educ.png saved as PNG format
+(results es are active now)
+
+ ( 1)  Tm3 = 0
+ ( 2)  Tm2 = 0
+ ( 3)  Tm1 = 0
+
+           chi2(  3) =    7.52
+         Prob > chi2 =    0.0569
+(results es are active now)
+
+ ( 1)  Tp0 = 0
+ ( 2)  Tp1 = 0
+ ( 3)  Tp2 = 0
+
+           chi2(  3) =    0.91
+         Prob > chi2 =    0.8232
+(results es are active now)
+
+ ( 1)  Tp3 = 0
+ ( 2)  Tp4 = 0
+
+           chi2(  2) =    0.29
+         Prob > chi2 =    0.8636
+(results es are active now)
+
+ ( 1)  Tp5 = 0
+ ( 2)  Tp6 = 0
+
+           chi2(  2) =    5.26
+         Prob > chi2 =    0.0721
+  965,007
+  99,323
+  10,733
+  88,590
+successfully created "/projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/results/tables/ES_gap_educ.doc
+> x"
+Panel is not balanced
+Will use observations with Pair balanced (observed at t0 and t1)
+(file results/plots/ES_gap_disab.png not found)
+file results/plots/ES_gap_disab.png saved as PNG format
+(results es are active now)
+
+ ( 1)  Tm3 = 0
+ ( 2)  Tm2 = 0
+ ( 3)  Tm1 = 0
+
+           chi2(  3) =    1.95
+         Prob > chi2 =    0.5825
+(results es are active now)
+
+ ( 1)  Tp0 = 0
+ ( 2)  Tp1 = 0
+ ( 3)  Tp2 = 0
+
+           chi2(  3) =    5.31
+         Prob > chi2 =    0.1503
+(results es are active now)
+
+ ( 1)  Tp3 = 0
+ ( 2)  Tp4 = 0
+
+           chi2(  2) =    0.51
+         Prob > chi2 =    0.7734
+(results es are active now)
+
+ ( 1)  Tp5 = 0
+ ( 2)  Tp6 = 0
+
+           chi2(  2) =    2.67
+         Prob > chi2 =    0.2627
+  965,007
+  99,323
+  10,733
+  88,590
+successfully created "/projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/results/tables/ES_gap_disab.do
+> cx"
+
+. 
+. 
+end of do-file
+
+. 
+. di as txt "C&SA DiD completed"
+C&SA DiD completed
+
+. log close
+      name:  <unnamed>
+       log:  /projectnb/glob-s/Khoa/impact-of-distruptions-on-firms/analysis/callaway_did.log
+  log type:  text
+ closed on:   8 Feb 2026, 13:32:08
+--------------------------------------------------------------------------------------------------------------------
